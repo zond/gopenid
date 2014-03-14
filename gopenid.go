@@ -10,8 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/zond/diplicity/common"
 )
 
 const (
@@ -94,7 +92,7 @@ type xrdDoc struct {
 	XRD string `xml:"XRD>Service>URI"`
 }
 
-func join(u *url.URL, q url.Values) (result *url.URL) {
+func join(u *url.URL, q url.Values) (result *url.URL, err error) {
 	buf := bytes.NewBufferString(u.Scheme)
 	fmt.Fprint(buf, "://")
 	if u.User != nil {
@@ -112,37 +110,39 @@ func join(u *url.URL, q url.Values) (result *url.URL) {
 	} else {
 		fmt.Fprintf(buf, "?%v&%v", u.RawQuery, q.Encode())
 	}
-	result = common.MustParseURL(string(buf.Bytes()))
+	result, err = url.Parse(buf.String())
 	return
 }
 
-func getEndpoint() *url.URL {
-	var err error
+func getEndpoint() (result *url.URL, err error) {
 	if endpoint == nil {
 		var req *http.Request
 		if req, err = http.NewRequest("GET", discovery, nil); err != nil {
-			panic(err)
+			return
 		}
 		var resp *http.Response
 		if resp, err = new(http.Client).Do(req); err != nil {
-			panic(err)
+			return
 		}
 		dec := xml.NewDecoder(resp.Body)
 		var x xrdDoc
 		if err = dec.Decode(&x); err != nil {
-			panic(err)
+			return
 		}
-		endpoint = common.MustParseURL(x.XRD)
+		result, err = url.Parse(x.XRD)
 	}
-	return endpoint
+	return
 }
 
 /*
 VerifyAuth verifies that r is a valid return redirect from a Google OpenID query where the user allowed his/identity
 to be publicized by returning the returnTo url provided in GetAuthURL, the identity and whether the validation was ok.
 */
-func VerifyAuth(r *http.Request) (returnTo *url.URL, result string, ok bool) {
-	endp := getEndpoint()
+func VerifyAuth(r *http.Request) (returnTo *url.URL, result string, ok bool, err error) {
+	endp, err := getEndpoint()
+	if err != nil {
+		return
+	}
 	query := endp.Query()
 	r.ParseForm()
 	var nonce string
@@ -152,7 +152,9 @@ func VerifyAuth(r *http.Request) (returnTo *url.URL, result string, ok bool) {
 				result = value
 			}
 			if key == "openid.secondary_return_to" {
-				returnTo = common.MustParseURL(value)
+				if returnTo, err = url.Parse(value); err != nil {
+					return
+				}
 			}
 			if key == "openid.response_nonce" {
 				nonce = value
@@ -161,13 +163,17 @@ func VerifyAuth(r *http.Request) (returnTo *url.URL, result string, ok bool) {
 		}
 	}
 	query.Set("openid.mode", "check_authentication")
-	response, err := new(http.Client).Get(join(endp, query).String())
+	joined, err := join(endp, query)
 	if err != nil {
-		panic(err)
+		return
+	}
+	response, err := new(http.Client).Get(joined.String())
+	if err != nil {
+		return
 	}
 	bod, err := ioutil.ReadAll(response.Body)
 	if err != nil {
-		panic(err)
+		return
 	}
 	for _, line := range strings.Split(string(bod), "\n") {
 		kv := strings.SplitN(line, ":", 2)
@@ -180,7 +186,8 @@ func VerifyAuth(r *http.Request) (returnTo *url.URL, result string, ok bool) {
 			}
 		case "ns":
 			if kv[1] != "http://specs.openid.net/auth/2.0" {
-				panic(fmt.Errorf("Unknown namespace: %v", kv[1]))
+				err = fmt.Errorf("Unknown namespace: %v", kv[1])
+				return
 			}
 		}
 	}
@@ -191,8 +198,11 @@ func VerifyAuth(r *http.Request) (returnTo *url.URL, result string, ok bool) {
 GetAuthURL returns a url that will validate a users identity via Google OpenID and then return with
 a redirect that will return the same returnTo url when VerifyAuth is called.
 */
-func GetAuthURL(r *http.Request, returnTo *url.URL) (result *url.URL) {
-	endp := getEndpoint()
+func GetAuthURL(r *http.Request, returnTo *url.URL) (result *url.URL, err error) {
+	endp, err := getEndpoint()
+	if err != nil {
+		return
+	}
 	query := endp.Query()
 	query.Add("openid.mode", "checkid_setup")
 	query.Add("openid.ns", "http://specs.openid.net/auth/2.0")
